@@ -2,7 +2,7 @@ import cupy as cp
 DT = cp.float32
 
 class CG:
-    def go(self, X):
+    def forward(self, X):
         pass
 
     def backprop(self, D):
@@ -14,6 +14,11 @@ class CG:
     def grad(self):
         return []
 
+    def finalize(self,X,cur,total):
+        return self.forward(X)
+
+    def infer(self,X):
+        return self.forward(X)
 
 class Conv(CG):
     def __init__(self, w, h, d, n):
@@ -35,7 +40,7 @@ class Conv(CG):
         self.K += dK
         self.b += db
 
-    def go(self, X):
+    def forward(self, X):
         self.X = X
 
         batch = X.shape[0]
@@ -99,7 +104,7 @@ class Pool(CG):
         self.h = h
         self.d = d
 
-    def go(self, X):
+    def forward(self, X):
         self.X = X
 
         h = self.h
@@ -152,7 +157,7 @@ class FC(CG):
         self.W += dW
         self.b += db
 
-    def go(self, X):
+    def forward(self, X):
         self.X = X.reshape(-1,self.w).transpose(1,0)
         return (cp.dot(self.W, self.X) + self.b).transpose(1,0).reshape(-1,self.s,1,1)
 
@@ -174,8 +179,11 @@ class BatchNorm(CG):
         self.w = w
         self.g = cp.ones((1,d,1,1),dtype=DT)
         self.B = cp.zeros((1,d,1,1),dtype=DT)
+        self.gF = cp.zeros((1,d,1,1),dtype=DT)
+        self.BF = cp.zeros((1,d,1,1),dtype=DT)
         self.dg = cp.zeros((1,d,1,1),dtype=DT)
         self.dB = cp.zeros((1,d,1,1),dtype=DT)
+
         self.eps = 1e-8
 
     def grad(self):
@@ -186,7 +194,7 @@ class BatchNorm(CG):
         self.g+=dg
         self.B+=dB
 
-    def go(self, X):
+    def forward(self, X):
         batch = X.shape[0]
 
         self.m = (batch*self.w*self.h)
@@ -196,6 +204,30 @@ class BatchNorm(CG):
         self.v_eps_inv_sqrt = self.v_eps**-0.5
         self.xh = self.centered*self.v_eps_inv_sqrt
         return self.xh*self.g+self.B
+
+    def finalize(self,X,cur,batches):
+        if cur==0:
+            self.uP = cp.zeros((1, self.d, 1, 1), dtype=DT)
+            self.vP = cp.zeros((1, self.d, 1, 1), dtype=DT)
+        batch = X.shape[0]
+        m = (batch*self.w*self.h)
+
+        u = cp.sum(X, axis=(0, 2, 3), keepdims=True) / m
+        v = cp.sum((X-u)**2,axis=(0,2,3),keepdims=True)/m
+        self.uP += u * (1/batches)
+        self.vP += v * (1/batches) * (m/(m-1))
+        ret = self.forward(X)
+
+        g_v_eps_inv_sqrt = self.g*(self.vP+self.eps)**-0.5
+
+        if cur==batches-1:
+            self.BF = self.B - self.uP*g_v_eps_inv_sqrt
+            self.gF = g_v_eps_inv_sqrt
+
+        return ret
+
+    def infer(self,X):
+        return X*self.gF+self.BF
 
     def backprop(self, D):
 
@@ -210,12 +242,12 @@ class BatchNorm(CG):
         return dx
 
 class Relu(CG):
-    def go(self, X):
+    def forward(self, X):
         self.route = X <= 0
         return cp.maximum(X, 0)
 
     def backprop(self, D):
-        D[self.route] *= 0.01
+        D[self.route] =0#*= 0.01
         return D
 
 
@@ -230,7 +262,7 @@ class Flat(CG):
         self.h = h
         self.d = d
 
-    def go(self, X):
+    def forward(self, X):
         return X.reshape(-1, self.d*self.w * self.h,1,1)
 
     def backprop(self, D):
