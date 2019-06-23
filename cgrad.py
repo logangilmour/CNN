@@ -172,19 +172,42 @@ class BatchNorm(CG):
         self.d = d
         self.h = h
         self.w = w
+        self.g = cp.ones((1,d,1,1),dtype=DT)
+        self.B = cp.zeros((1,d,1,1),dtype=DT)
+        self.dg = cp.zeros((1,d,1,1),dtype=DT)
+        self.dB = cp.zeros((1,d,1,1),dtype=DT)
+        self.eps = 1e-8
 
     def grad(self):
-        pass
+        return self.dg, self.dB
 
     def update(self, delta):
-        pass
+        (dg,dB) = delta
+        self.g+=dg
+        self.B+=dB
 
     def go(self, X):
-        pass
+        batch = X.shape[0]
+
+        self.m = (batch*self.w*self.h)
+        u = cp.sum(X,axis=(0,2,3),keepdims=True)/self.m
+        self.centered = X-u
+        self.v_eps = cp.sum(self.centered**2,axis=(0,2,3),keepdims=True)/self.m+self.eps
+        self.v_eps_inv_sqrt = self.v_eps**-0.5
+        self.xh = self.centered*self.v_eps_inv_sqrt
+        return self.xh*self.g+self.B
 
     def backprop(self, D):
-        pass
 
+        dxh = D*self.g
+
+        dv = cp.sum(dxh*self.centered*-0.5*self.v_eps_inv_sqrt**3,axis=(0,2,3),keepdims=True)
+        du = cp.sum(dxh*-self.v_eps_inv_sqrt,axis=(0,2,3),keepdims=True)+dv*cp.sum(-2*self.centered,axis=(0,2,3),keepdims=True)/self.m
+        dx = dxh*self.v_eps_inv_sqrt + dv*2*self.centered/self.m + du/self.m
+        self.dg = cp.sum(D*self.xh,axis=(0,2,3),keepdims=True)
+        self.dB = cp.sum(D,axis=(0,2,3),keepdims=True)
+
+        return dx
 
 class Relu(CG):
     def go(self, X):
